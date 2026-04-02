@@ -1,8 +1,9 @@
 """
-Unified Flash Attention interface with automatic FA3/SDPA switching.
+Unified Flash Attention interface with automatic FA3/FA4/FA2/SDPA switching.
 
 Exports `flash_attn` module that matches the FA3 API exactly, but falls back
-to PyTorch SDPA on non-Hopper GPUs (including Blackwell), MPS, and CPU.
+to FlashAttention-4 on supported Blackwell setups, FlashAttention-2 on other
+supported CUDA GPUs, and finally to PyTorch SDPA on other devices.
 
 Usage (drop-in replacement for FA3):
     from nanochat.flash_attention import flash_attn
@@ -15,10 +16,11 @@ Usage (drop-in replacement for FA3):
 """
 import torch
 import torch.nn.functional as F
+from types import SimpleNamespace
 
 
 # =============================================================================
-# Detection: Try to load FA3 on Hopper+ GPUs
+# Detection: Try to load FA3 on Hopper, FA4 on Blackwell, then FA2
 # =============================================================================
 def _load_flash_attention_3():
     """Try to load Flash Attention 3 (requires Hopper GPU, sm90)."""
@@ -37,30 +39,112 @@ def _load_flash_attention_3():
     except Exception:
         return None
 
+def _load_flash_attention_2():
+    """Try to load Flash Attention 2 from the flash_attn package."""
+    if not torch.cuda.is_available():
+        return None
+    try:
+        from flash_attn import flash_attn_func, flash_attn_with_kvcache
+        return SimpleNamespace(
+            flash_attn_func=flash_attn_func,
+            flash_attn_with_kvcache=flash_attn_with_kvcache,
+        )
+    except Exception:
+        return None
+
+def _load_flash_attention_4():
+    """Try to load Flash Attention 4 from the flash_attn.cute package."""
+    if not torch.cuda.is_available():
+        return None
+    try:
+        major, _ = torch.cuda.get_device_capability()
+        # Keep Hopper on FA3; use FA4 primarily for Blackwell-class GPUs.
+        if major < 10:
+            return None
+        from flash_attn.cute import flash_attn_func
+        try:
+            from flash_attn.cute import flash_attn_with_kvcache
+        except Exception:
+            flash_attn_with_kvcache = None
+        return SimpleNamespace(
+            flash_attn_func=flash_attn_func,
+            flash_attn_with_kvcache=flash_attn_with_kvcache,
+        )
+    except Exception:
+        return None
+
 
 _fa3 = _load_flash_attention_3()
+_fa4 = _load_flash_attention_4()
+_fa2 = _load_flash_attention_2()
 HAS_FA3 = _fa3 is not None
+HAS_FA4 = _fa4 is not None
+HAS_FA2 = _fa2 is not None
+HAS_FA4_KVCACHE = HAS_FA4 and _fa4.flash_attn_with_kvcache is not None
 
-# Override for testing: set to 'fa3', 'sdpa', or None (auto)
+# Override for testing: set to 'fa3', 'fa4', 'fa2', 'sdpa', or None (auto)
 _override_impl = None
 
 
-def _resolve_use_fa3():
-    """Decide once whether to use FA3, based on availability, override, and dtype."""
+def _resolve_attention_backend():
+    """Decide once which backend to use for full-sequence attention."""
     if _override_impl == 'fa3':
         assert HAS_FA3, "Cannot override to FA3: not available on this hardware"
-        return True
+        return "fa3"
+    if _override_impl == 'fa4':
+        assert HAS_FA4, "Cannot override to FA4: flash-attn-4 is not available"
+        return "fa4"
+    if _override_impl == 'fa2':
+        assert HAS_FA2, "Cannot override to FA2: flash_attn is not available"
+        return "fa2"
     if _override_impl == 'sdpa':
-        return False
+        return "sdpa"
+
+    from nanochat.common import COMPUTE_DTYPE
     if HAS_FA3:
         # FA3 Hopper kernels only support bf16 and fp8; fp16/fp32 must use SDPA fallback
-        from nanochat.common import COMPUTE_DTYPE
         if COMPUTE_DTYPE == torch.bfloat16:
-            return True
-        return False
-    return False
+            return "fa3"
+        return "sdpa"
+    if HAS_FA4:
+        # FA4 supports reduced precision training/inference kernels; keep fp32 on SDPA.
+        if COMPUTE_DTYPE in (torch.float16, torch.bfloat16):
+            return "fa4"
+        return "sdpa"
+    if HAS_FA2:
+        # FA2 CUDA kernels support fp16 and bf16.
+        if COMPUTE_DTYPE in (torch.float16, torch.bfloat16):
+            return "fa2"
+        return "sdpa"
+    return "sdpa"
 
-USE_FA3 = _resolve_use_fa3()
+def _resolve_kvcache_backend():
+    """Decide once which backend to use for incremental attention with KV cache."""
+    if _override_impl == 'fa3':
+        assert HAS_FA3, "Cannot override to FA3: not available on this hardware"
+        return "fa3"
+    if _override_impl == 'fa4':
+        assert HAS_FA4_KVCACHE, "Cannot override to FA4 KV cache: flash-attn-4 kvcache API is not available"
+        return "fa4"
+    if _override_impl == 'fa2':
+        assert HAS_FA2, "Cannot override to FA2: flash_attn is not available"
+        return "fa2"
+    if _override_impl == 'sdpa':
+        return "sdpa"
+
+    if HAS_FA3:
+        return "fa3"
+    if HAS_FA4_KVCACHE:
+        return "fa4"
+    if HAS_FA2:
+        return "fa2"
+    return "sdpa"
+
+ATTN_IMPL = _resolve_attention_backend()
+KVCACHE_IMPL = _resolve_kvcache_backend()
+USE_FA3 = ATTN_IMPL == "fa3"
+USE_FA4 = ATTN_IMPL == "fa4"
+USE_FA2 = ATTN_IMPL == "fa2"
 
 
 # =============================================================================
@@ -118,6 +202,10 @@ def flash_attn_func(q, k, v, causal=False, window_size=(-1, -1)):
     """
     if USE_FA3:
         return _fa3.flash_attn_func(q, k, v, causal=causal, window_size=window_size)
+    if USE_FA4:
+        return _fa4.flash_attn_func(q, k, v, causal=causal)
+    if USE_FA2:
+        return _fa2.flash_attn_func(q, k, v, dropout_p=0.0, causal=causal, window_size=window_size)
 
     # SDPA fallback: transpose (B, T, H, D) -> (B, H, T, D)
     q = q.transpose(1, 2)
@@ -146,8 +234,18 @@ def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=N
     Returns:
         Output tensor of shape (B, T_new, H, D)
     """
-    if USE_FA3:
+    if KVCACHE_IMPL == "fa3":
         return _fa3.flash_attn_with_kvcache(
+            q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens,
+            causal=causal, window_size=window_size
+        )
+    if KVCACHE_IMPL == "fa4":
+        return _fa4.flash_attn_with_kvcache(
+            q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens,
+            causal=causal, window_size=window_size
+        )
+    if KVCACHE_IMPL == "fa2":
+        return _fa2.flash_attn_with_kvcache(
             q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens,
             causal=causal, window_size=window_size
         )
@@ -180,7 +278,6 @@ def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=N
 # =============================================================================
 # Export: flash_attn module interface (drop-in replacement for FA3)
 # =============================================================================
-from types import SimpleNamespace
 flash_attn = SimpleNamespace(
     flash_attn_func=flash_attn_func,
     flash_attn_with_kvcache=flash_attn_with_kvcache,

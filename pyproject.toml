@@ -59,6 +59,12 @@ cpu = [
 gpu = [
     "torch==2.9.1",
 ]
+fa2 = [
+    "flash-attn==2.8.3",
+]
+fa4 = [
+    "flash-attn-4==4.0.0b7",
+]
 
 [tool.uv]
 default-groups = []
