@@ -32,8 +32,10 @@ See [dev/LEADERBOARD.md](dev/LEADERBOARD.md) for more docs on how to interpret a
 nanochat uses [uv](https://docs.astral.sh/uv/) for dependency management. To install:
 
 ```bash
-uv sync --extra gpu    # Use for CUDA (A100/H100/etc.)
-uv sync --extra cpu    # (or) Use for CPU-only / MPS
+uv sync --extra gpu                # Base CUDA install
+uv sync --extra gpu --extra fa3    # Hopper/H100/H200, builds official FA3 from source
+uv sync --extra gpu --extra fa4    # Blackwell
+uv sync --extra cpu                # CPU-only / MPS
 source .venv/bin/activate
 ```
 
@@ -41,6 +43,7 @@ For development (adds pytest, matplotlib, ipykernel, transformers, etc.):
 
 ```bash
 uv sync --extra gpu --group dev
+# add --extra fa3 on Hopper or --extra fa4 on Blackwell
 ```
 
 ### Reproduce and talk to GPT-2

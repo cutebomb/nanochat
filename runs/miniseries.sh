@@ -14,7 +14,7 @@ if [ -z "$SKIP_SETUP" ]; then
     # uv
     command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
     [ -d ".venv" ] || uv venv
-    uv sync --extra gpu
+    uv sync --extra gpu --extra fa3
     source .venv/bin/activate
 
     # Tokenizer, download 1000 shards for pretraining

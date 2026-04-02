@@ -90,7 +90,7 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat-sf
 
 # Flash Attention status
 if ATTN_IMPL == "fa3":
-    print0("✓ Using Flash Attention 3.")
+    print0("✓ Using Flash Attention 3 (official hopper build).")
 elif ATTN_IMPL == "fa4":
     print0("✓ Using Flash Attention 4.")
 elif ATTN_IMPL == "fa2":
@@ -100,6 +100,8 @@ else:
         print0(f"WARNING: Flash Attention 3 only supports bf16, but COMPUTE_DTYPE={COMPUTE_DTYPE}. Using PyTorch SDPA fallback.")
     elif device_type == "cuda" and not (HAS_FA2 or HAS_FA4):
         print0("WARNING: No Flash Attention package is installed, using PyTorch SDPA fallback.")
+        print0("WARNING: Install FA3 on Hopper with: uv sync --extra gpu --extra fa3")
+        print0("WARNING: Install FA4 on Blackwell with: uv sync --extra gpu --extra fa4")
     else:
         print0("WARNING: Flash Attention not available, using PyTorch SDPA fallback.")
     print0("WARNING: Training will be less efficient.")

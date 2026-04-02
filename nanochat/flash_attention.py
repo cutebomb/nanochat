@@ -20,22 +20,18 @@ from types import SimpleNamespace
 
 
 # =============================================================================
-# Detection: Try to load FA3 on Hopper, FA4 on Blackwell, then FA2
+# Detection: Try to load FA3, FA4, then FA2
 # =============================================================================
 def _load_flash_attention_3():
-    """Try to load Flash Attention 3 (requires Hopper GPU, sm90)."""
+    """Try to load official Flash Attention 3 from the hopper package."""
     if not torch.cuda.is_available():
         return None
     try:
-        major, _ = torch.cuda.get_device_capability()
-        # FA3 kernels are compiled for Hopper (sm90) only
-        # Ada (sm89), Blackwell (sm100) need SDPA fallback until FA3 is recompiled
-        if major != 9:
-            return None
-        import os
-        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-        from kernels import get_kernel
-        return get_kernel('varunneal/flash-attention-3').flash_attn_interface
+        import flash_attn_interface
+        return SimpleNamespace(
+            flash_attn_func=flash_attn_interface.flash_attn_func,
+            flash_attn_with_kvcache=flash_attn_interface.flash_attn_with_kvcache,
+        )
     except Exception:
         return None
 
@@ -101,8 +97,14 @@ def _resolve_attention_backend():
         return "sdpa"
 
     from nanochat.common import COMPUTE_DTYPE
+    major = torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else None
+    if major is not None and major >= 10 and HAS_FA4:
+        # Prefer FA4 on Blackwell when available.
+        if COMPUTE_DTYPE in (torch.float16, torch.bfloat16):
+            return "fa4"
+        return "sdpa"
     if HAS_FA3:
-        # FA3 Hopper kernels only support bf16 and fp8; fp16/fp32 must use SDPA fallback
+        # Our FA3 path currently targets bf16.
         if COMPUTE_DTYPE == torch.bfloat16:
             return "fa3"
         return "sdpa"
@@ -132,10 +134,10 @@ def _resolve_kvcache_backend():
     if _override_impl == 'sdpa':
         return "sdpa"
 
-    if HAS_FA3:
-        return "fa3"
     if HAS_FA4_KVCACHE:
         return "fa4"
+    if HAS_FA3:
+        return "fa3"
     if HAS_FA2:
         return "fa2"
     return "sdpa"
